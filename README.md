@@ -1,10 +1,15 @@
 # Face Swap Live — Monorepo
 
-End-to-end **WebRTC live video** between a React Native mobile client and a Python
+End-to-end **WebRTC live video** between a browser-based PC client and a Python
 FastAPI + aiortc server.
 
+**Current supported client:** PC web browser (`apps/web/`) — Chrome / Edge on Windows 11.  
 **Milestone 1 (current):** server echoes the client's camera video back (loopback).  
 **Next milestone:** insert an AI face-swap transform inside `apps/server/app/video_transform.py`.
+
+> **Mobile note:** `apps/mobile/` (React Native) is present in the repo but is
+> **not used for the current testing phase**.  Mobile support will be revisited
+> once the PC loopback is validated.
 
 ---
 
@@ -14,7 +19,10 @@ FastAPI + aiortc server.
 face-swap-live/
 ├── apps/
 │   ├── server/          # Python – FastAPI + aiortc
-│   └── mobile/          # React Native Bare (Android & iOS)
+│   ├── web/             # PC browser WebRTC client  ← active client
+│   └── mobile/          # React Native (not used for now)
+├── scripts/
+│   └── dev.ps1          # Windows dev convenience script
 └── README.md
 ```
 
@@ -32,22 +40,15 @@ face-swap-live/
 > Install [C++ Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe) →
 > select **Desktop development with C++** before running `pip install`.
 
-### Mobile (Android & iOS)
-| Requirement | Notes |
-|---|---|
-| Node.js | 18+ |
-| JDK 17 | for Android builds |
-| Android Studio + SDK | Android emulator / device |
-| Xcode (macOS only) | iOS builds require a Mac |
-
-React Native is cross-platform: the **same `apps/mobile/` code** runs on both Android
-and iOS.  Building for **Android works on Windows**.  Building for **iOS requires a Mac
-with Xcode** — on Windows you can develop the server and the Android app; hand the `ios/`
-folder to a Mac for iOS builds.
+### Web client
+No build step needed — it is a plain HTML/JS file served by Python's built-in
+HTTP server.  A modern browser (Chrome or Edge) with a webcam is all you need.
 
 ---
 
-## Running the server (Windows 11)
+## PC-only quick start (Windows 11)
+
+### Step 1 — Start the server
 
 ```powershell
 cd apps\server
@@ -57,68 +58,48 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Verify:
-- PC: <http://localhost:8000/webrtc/health>
-- Android emulator: <http://10.0.2.2:8000/webrtc/health>
-- Real device (same Wi-Fi): `http://<PC_LAN_IP>:8000/webrtc/health`
+Confirm it is running:
 
-### Windows Firewall (real device)
-Allow inbound TCP 8000 on Private networks:
+```
+http://localhost:8000/webrtc/health
+```
+
+Expected response: `{"ok": true, "pcs": 0}`
+
+### Step 2 — Serve the web client
+
+Open a **second** terminal in the repo root:
 
 ```powershell
-New-NetFirewallRule -DisplayName "face-swap FastAPI" -Direction Inbound `
-  -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private
+python -m http.server 5173
+```
+
+### Step 3 — Open in Chrome / Edge
+
+```
+http://localhost:5173/apps/web/index.html
+```
+
+Click **▶ Start** and allow camera access when prompted.
+
+### Dev convenience script (optional)
+
+`scripts/dev.ps1` handles venv activation, starts uvicorn, and prints the
+static-server command for you:
+
+```powershell
+.\scripts\dev.ps1
 ```
 
 ---
 
-## Running the mobile app
+## What you should see
 
-### Step 1 — Install dependencies
-```bash
-cd apps/mobile
-npm install
-```
-
-### Step 2 — Set the server host in `App.tsx`
-
-Open `apps/mobile/App.tsx` and edit `SERVER_HOST`:
-
-| Scenario | Value |
+| Element | Expected |
 |---|---|
-| Android emulator (default) | `10.0.2.2` |
-| Real Android/iOS device on LAN | your PC's Wi-Fi IPv4, e.g. `192.168.1.20` |
-
-To find your PC's LAN IP on Windows:
-```powershell
-ipconfig
-# look for "Wireless LAN adapter Wi-Fi" → IPv4 Address
-```
-
-### Step 3 — Android (works on Windows)
-```bash
-# start Metro bundler
-npx react-native start
-
-# in a second terminal
-npx react-native run-android
-```
-
-### Step 4 — iOS (requires macOS + Xcode)
-```bash
-cd ios
-pod install
-cd ..
-npx react-native run-ios --device
-```
-
-**iOS permissions** — add to `apps/mobile/ios/<AppName>/Info.plist`:
-```xml
-<key>NSCameraUsageDescription</key>
-<string>This app needs camera access for live face-swap preview.</string>
-<key>NSMicrophoneUsageDescription</key>
-<string>This app needs microphone access for live streaming.</string>
-```
+| **Local** video | Your webcam feed |
+| **Remote** video | Same feed echoed back by the server (slight latency) |
+| **Log** | ICE / connection state ending in `connected` |
 
 ---
 
@@ -126,13 +107,22 @@ npx react-native run-ios --device
 
 | Problem | Fix |
 |---|---|
-| Phone can't reach server | Check Windows Firewall (see above); ensure phone and PC are on same Wi-Fi |
+| Camera permission denied | Allow camera in browser popup; or open `chrome://settings/content/camera` |
+| Remote video stays black | Check server console for errors; confirm `/webrtc/health` returns `ok: true` |
+| `fetch` fails / CORS error | Ensure the server is running on `localhost:8000` |
+| Mixed-content blocked | Both servers must use `http://` on localhost (no `https` mismatch needed) |
+| `getUserMedia` not available | Must open the page via `http://localhost`; `file://` URLs don't expose camera API |
 | `pip install av` fails on Windows | Install [C++ Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe) |
-| App stays "starting" / no remote video | Confirm health endpoint is reachable from the device; check server console for errors |
-| `getUserMedia` denied on Android | Accept camera permission dialog; check AndroidManifest permissions |
-| iOS build fails on Windows | iOS requires macOS + Xcode; use Android for Windows development |
-| Remote stream never appears | Ensure the server is running and loopback track was added (check `/webrtc/health`) |
+| Port 8000 blocked | No firewall rule needed for localhost testing |
 
 ---
 
-See `apps/server/README.md` for server-specific details.
+## Mobile (`apps/mobile/`) — not used for now
+
+The React Native Bare client is kept in the repo for future reference.
+It will be revisited after the PC loopback milestone is complete.
+For mobile-specific notes see `apps/mobile/` and the previous README sections.
+
+---
+
+See `apps/server/README.md` and `apps/web/README.md` for component-specific details.
