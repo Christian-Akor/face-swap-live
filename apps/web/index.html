@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Face Swap Live — PC WebRTC Test</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 16px; background: #1a1a1a; color: #e0e0e0; }
+      h2 { margin-top: 0; }
+      .row { display: flex; gap: 16px; flex-wrap: wrap; }
+      .col { flex: 1; min-width: 280px; }
+      video { width: 100%; height: 300px; background: #111; border: 1px solid #333; border-radius: 4px; }
+      .controls { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+      label { font-size: 0.9em; }
+      input[type="text"] { flex: 1; min-width: 240px; padding: 6px 8px; background: #2a2a2a; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; font-size: 0.9em; }
+      button { padding: 7px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+      #btnStart { background: #2a7d4f; color: #fff; }
+      #btnStart:disabled { background: #1a4d2f; cursor: not-allowed; }
+      #btnStop  { background: #7d2a2a; color: #fff; }
+      #btnStop:disabled  { background: #4d1a1a; cursor: not-allowed; }
+      #status { font-size: 0.85em; padding: 4px 8px; border-radius: 4px; background: #2a2a2a; }
+      pre { background: #0b0b0b; color: #b0e0b0; padding: 10px; height: 180px; overflow-y: auto; border-radius: 4px; font-size: 0.82em; margin: 0; }
+      h3 { margin: 8px 0 6px; font-size: 1em; color: #aaa; }
+    </style>
+  </head>
+  <body>
+    <h2>Face Swap Live — WebRTC Loopback Test (PC Browser ↔ FastAPI/aiortc)</h2>
+
+    <div class="controls">
+      <label for="urlInput">Server offer URL:</label>
+      <input id="urlInput" type="text" value="http://localhost:8000/webrtc/offer" />
+      <button id="btnStart">▶ Start</button>
+      <button id="btnStop" disabled>■ Stop</button>
+      <span id="status">idle</span>
+    </div>
+
+    <div class="row">
+      <div class="col">
+        <h3>Local (your webcam)</h3>
+        <video id="videoLocal" autoplay playsinline muted></video>
+      </div>
+      <div class="col">
+        <h3>Remote (server loopback)</h3>
+        <video id="videoRemote" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <h3>Log</h3>
+    <pre id="logBox"></pre>
+
+    <script>
+      "use strict";
+
+      const urlInput   = document.getElementById("urlInput");
+      const btnStart   = document.getElementById("btnStart");
+      const btnStop    = document.getElementById("btnStop");
+      const statusEl   = document.getElementById("status");
+      const logBox     = document.getElementById("logBox");
+      const videoLocal = document.getElementById("videoLocal");
+      const videoRemote= document.getElementById("videoRemote");
+
+      let pc = null;
+      let localStream = null;
+
+      function log(...args) {
+        const ts = new Date().toISOString().slice(11, 23);
+        logBox.textContent += `[${ts}] ${args.join(" ")}\n`;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function start() {
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        setStatus("starting…");
+
+        const offerUrl = urlInput.value.trim();
+
+        try {
+          // 1. Acquire local camera
+          log("Requesting camera via getUserMedia…");
+          localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          videoLocal.srcObject = localStream;
+          log("Camera acquired:", localStream.getVideoTracks()[0].label);
+
+          // 2. Create peer connection
+          pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+          });
+
+          pc.oniceconnectionstatechange = () => {
+            log("ICE state:", pc.iceConnectionState);
+            setStatus("ice: " + pc.iceConnectionState);
+          };
+
+          pc.onconnectionstatechange = () => {
+            log("Connection state:", pc.connectionState);
+            setStatus("pc: " + pc.connectionState);
+          };
+
+          pc.ontrack = (ev) => {
+            log("Remote track received, kind:", ev.track.kind);
+            if (ev.streams && ev.streams[0]) {
+              videoRemote.srcObject = ev.streams[0];
+            } else {
+              // Fallback: wrap track in a MediaStream
+              const s = new MediaStream([ev.track]);
+              videoRemote.srcObject = s;
+            }
+          };
+
+          // 3. Add local tracks
+          localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+          // Ask the server to send video back (sendrecv on local, recvonly transceiver)
+          pc.addTransceiver("video", { direction: "recvonly" });
+
+          // 4. Create and send SDP offer
+          log("Creating SDP offer…");
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          log("Local description set.");
+
+          log("POST offer →", offerUrl);
+          const res = await fetch(offerUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+          });
+
+          if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`Server returned ${res.status}: ${body}`);
+          }
+
+          // 5. Apply SDP answer
+          const answer = await res.json();
+          log("Received SDP answer from server.");
+          await pc.setRemoteDescription(answer);
+          log("Remote description set — signaling complete.");
+          setStatus("connected");
+
+        } catch (err) {
+          log("ERROR:", err.message);
+          setStatus("error");
+          await stop(true);
+        }
+      }
+
+      async function stop(keepStartEnabled = false) {
+        if (pc) {
+          pc.close();
+          pc = null;
+        }
+        if (localStream) {
+          localStream.getTracks().forEach((t) => t.stop());
+          localStream = null;
+        }
+        videoLocal.srcObject  = null;
+        videoRemote.srcObject = null;
+        btnStop.disabled = true;
+        btnStart.disabled = false;
+        setStatus("stopped");
+        log("Session stopped.");
+      }
+
+      btnStart.addEventListener("click", start);
+      btnStop.addEventListener("click",  () => stop());
+    </script>
+  </body>
+</html>
